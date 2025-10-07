@@ -1,62 +1,96 @@
 import os
-from fastapi import FastAPI
+import httpx
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from openai import OpenAI
-from starlette.responses import JSONResponse
+from fastapi.responses import JSONResponse
 
-# === Config ===
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-WORKFLOW_ID = os.environ.get("WORKFLOW_ID", "")  # Pon aquí tu wf_... en Render
+# ========= CONFIG =========
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+WORKFLOW_ID = os.environ.get("WORKFLOW_ID")
+API_BASE = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+if not OPENAI_API_KEY:
+    raise RuntimeError("Falta OPENAI_API_KEY en variables de entorno.")
+if not WORKFLOW_ID:
+    raise RuntimeError("Falta WORKFLOW_ID en variables de entorno.")
 
+HEADERS = {
+    "Authorization": f"Bearer {OPENAI_API_KEY}",
+    "Content-Type": "application/json",
+    "OpenAI-Beta": "chatkit_beta=v1",
+}
+
+# ========= APP =========
 app = FastAPI(title="ChatKit token server")
 
-# CORS: permite tu(s) dominio(s). Si prefieres, usa ["*"] durante pruebas.
+# CORS abierto para superar preflight mientras probamos
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # o ["https://frankiefelicie.net", "https://www.frankiefelicie.net"]
-    allow_credentials=False,
-    allow_methods=["*"],
+    allow_origins=["*"],         # Cuando ya funcione, puedes cambiar a la lista de tus dominios
+    allow_credentials=False,     # IMPORTANTE: con "*" debe ser False
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
-class RefreshBody(BaseModel):
-    currentClientSecret: str | None = None
-
-@app.get("/health")
-def health():
-    ok = bool(OPENAI_API_KEY) and bool(WORKFLOW_ID)
+# ========= ROUTES =========
+@app.get("/")
+async def root():
     return {
-        "ok": ok,
+        "ok": True,
         "service": "ChatKit token server",
         "endpoints": ["/health", "/api/chatkit/start", "/api/chatkit/refresh"],
-        "workflow_id_present": bool(WORKFLOW_ID),
+        "workflow_env_present": bool(WORKFLOW_ID),
     }
 
-@app.post("/api/chatkit/start")
-def start_session():
-    if not OPENAI_API_KEY:
-        return JSONResponse(status_code=500, content={"error": "Missing OPENAI_API_KEY env var"})
-    if not WORKFLOW_ID:
-        return JSONResponse(status_code=500, content={"error": "Missing WORKFLOW_ID env var"})
+@app.get("/health")
+async def health():
+    return {"ok": True}
 
-    # 🔧 FIX CLAVE: usar `workflow` (no `workflow_id`)
-    session = client.beta.chatkit.sessions.create({
-        "workflow": {"id": WORKFLOW_ID},
+@app.post("/api/chatkit/start")
+async def start():
+    """
+    Crea una sesión de ChatKit y devuelve el client_secret (token corto).
+    """
+    payload = {
+        "workflow": {"id": WORKFLOW_ID},   # CLAVE: usar 'workflow' -> {'id': ...}
         "expires_in_seconds": 3600,
-    })
-    return {"client_secret": session.client_secret}
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(f"{API_BASE}/chatkit/sessions",
+                                  headers=HEADERS, json=payload)
+            data = r.json()
+            if r.status_code >= 400:
+                return JSONResponse({"error": data}, status_code=r.status_code)
+
+            # La API devuelve {"client_secret": {"value": "...", "expires_at": "..."}}
+            secret = data.get("client_secret", {})
+            if isinstance(secret, dict):
+                return {"client_secret": secret.get("value"), "expires_at": secret.get("expires_at")}
+            return {"client_secret": secret}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.post("/api/chatkit/refresh")
-def refresh_session(body: RefreshBody):
-    # Sencillo y robusto: en vez de "refresh", emitimos un nuevo token.
-    if not OPENAI_API_KEY or not WORKFLOW_ID:
-        return JSONResponse(status_code=500, content={"error": "Server not configured"})
-
-    session = client.beta.chatkit.sessions.create({
+async def refresh(request: Request):
+    """
+    Renovación sencilla: emitimos un NUEVO client_secret (evita edge-cases de refresh).
+    """
+    payload = {
         "workflow": {"id": WORKFLOW_ID},
         "expires_in_seconds": 3600,
-    })
-    return {"client_secret": session.client_secret}
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(f"{API_BASE}/chatkit/sessions",
+                                  headers=HEADERS, json=payload)
+            data = r.json()
+            if r.status_code >= 400:
+                return JSONResponse({"error": data}, status_code=r.status_code)
+
+            secret = data.get("client_secret", {})
+            if isinstance(secret, dict):
+                return {"client_secret": secret.get("value"), "expires_at": secret.get("expires_at")}
+            return {"client_secret": secret}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
