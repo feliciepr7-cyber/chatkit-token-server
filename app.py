@@ -3,7 +3,7 @@ import httpx
 from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 # ========= CONFIG =========
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -24,17 +24,32 @@ HEADERS = {
 # ========= APP =========
 app = FastAPI(title="ChatKit token server")
 
-# CORS abierto para pruebas (cuando funcione, cierra a tus dominios)
+# (1) CORS completamente abierto para pruebas (sin credenciales)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,                 # con "*" debe ser False
+    allow_origins=["*"],               # luego podremos cerrarlo a tus dominios
+    allow_credentials=False,           # con "*" debe ser False
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
+# (2) Middleware extra para forzar headers CORS en TODAS las respuestas
+@app.middleware("http")
+async def add_cors_headers(request: Request, call_next):
+    if request.method == "OPTIONS":
+        # Respuesta directa a preflight
+        response = PlainTextResponse("ok", status_code=200)
+    else:
+        response = await call_next(request)
+
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Expose-Headers"] = "*"
+    return response
+
 def anon_user_id() -> str:
-    """Genera un ID anónimo por sesión."""
     return f"anon_{uuid4().hex}"
 
 # ========= ROUTES =========
@@ -51,15 +66,24 @@ async def root():
 async def health():
     return {"ok": True}
 
+# (3) Endpoints OPTIONS explícitos (preflight)
+@app.options("/api/chatkit/start")
+async def options_start():
+    return PlainTextResponse("ok", status_code=200)
+
+@app.options("/api/chatkit/refresh")
+async def options_refresh():
+    return PlainTextResponse("ok", status_code=200)
+
 @app.post("/api/chatkit/start")
 async def start():
     """
     Crea una sesión de ChatKit y devuelve el client_secret (token corto).
-    REQUIERE: workflow + user
+    Requiere: workflow + user
     """
     payload = {
         "workflow": {"id": WORKFLOW_ID},
-        "user": {"id": anon_user_id()},      # <- CLAVE: incluir 'user'
+        "user": {"id": anon_user_id()},
         "expires_in_seconds": 3600,
     }
     try:
@@ -84,7 +108,7 @@ async def start():
 async def refresh(request: Request):
     """
     Estrategia simple: emitir un NUEVO client_secret (en lugar de 'refresh').
-    Debe incluir 'user' también.
+    También incluye 'user'.
     """
     payload = {
         "workflow": {"id": WORKFLOW_ID},
