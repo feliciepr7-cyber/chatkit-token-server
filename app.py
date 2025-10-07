@@ -24,7 +24,7 @@ HEADERS = {
 # ========= APP =========
 app = FastAPI(title="ChatKit token server")
 
-# CORS abierto para pruebas (luego lo cerramos a tus dominios)
+# CORS abierto (para pruebas). Luego lo cerramos a sus dominios.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -52,29 +52,26 @@ def anon_user_id() -> str:
 
 # ======== HELPERS =========
 async def create_chatkit_session():
-    """Llama a /chatkit/sessions con workflow + user y devuelve (ok, payload|error)."""
+    """
+    Llama a /chatkit/sessions con workflow + user (string) y devuelve (ok, payload|error).
+    NOTA: 'user' debe ser STRING, no objeto.
+    """
     payload = {
-        "workflow": {"id": WORKFLOW_ID},   # obligatorio
-        "user": {"id": anon_user_id()},    # obligatorio
-        # Nota: SIN 'expires_in_seconds' (la API ya no lo acepta)
+        "workflow": {"id": WORKFLOW_ID},
+        "user": anon_user_id(),   # <-- CLAVE: string, no {"id": ...}
+        # sin 'expires_in_seconds'
     }
     try:
         async with httpx.AsyncClient(timeout=40) as client:
             r = await client.post(f"{API_BASE}/chatkit/sessions", headers=HEADERS, json=payload)
-            # Intenta parsear JSON
             try:
                 data = r.json()
             except Exception:
                 data = {"raw": (await r.aread()).decode("utf-8", errors="replace")}
 
             if r.status_code >= 400:
-                return False, {
-                    "status": r.status_code,
-                    "json": data,
-                    "note": "Fallo al crear sesión de ChatKit",
-                }
+                return False, {"status": r.status_code, "json": data, "note": "Fallo al crear sesión de ChatKit"}
 
-            # Normaliza salida
             cs = data.get("client_secret")
             if isinstance(cs, dict):
                 return True, {"client_secret": cs.get("value"), "expires_at": cs.get("expires_at")}
@@ -96,7 +93,7 @@ async def root():
 async def health():
     return {"ok": True}
 
-# Preflights explícitos (por si algún proxy es quisquilloso)
+# Preflights explícitos
 @app.options("/api/chatkit/start")
 async def options_start():
     return PlainTextResponse("ok", status_code=200)
@@ -114,7 +111,7 @@ async def start():
 
 @app.post("/api/chatkit/refresh")
 async def refresh():
-    # Simplicidad: emitir un NUEVO client_secret (evita edge-cases de refresh)
+    # Simple: emitimos un NUEVO client_secret (evita edge cases de refresh)
     ok, result = await create_chatkit_session()
     if not ok:
         return JSONResponse({"error": result}, status_code=result.get("status", 500))
@@ -125,3 +122,4 @@ async def refresh():
 async def debug_start():
     ok, result = await create_chatkit_session()
     return {"ok": ok, "result": result}
+
