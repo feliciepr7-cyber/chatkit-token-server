@@ -1,64 +1,75 @@
 import os
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from openai import OpenAI
+from fastapi.responses import JSONResponse
+import httpx
 
-# --- Config básica ---
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY no está configurada")
-
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 WORKFLOW_ID = os.environ.get(
-    "WORKFLOW_ID",
-    "wf_68e51771e33c8190a73d77c930b53fbd09426d7625ac0c1f"
+    "CHATKIT_WORKFLOW_ID",
+    "wf_68e51771e33c8190a73d77c930b53fbd09426d7625ac0c1f"  # tu ID
 )
+API_BASE = os.environ.get("CHATKIT_API_BASE", "https://api.openai.com/v1")
 
-# Orígenes permitidos (CORS) desde env var o default
-origins_env = os.environ.get("ALLOWED_ORIGINS", "")
-if origins_env.strip():
-    ALLOWED_ORIGINS = [o.strip() for o in origins_env.split(",") if o.strip()]
-else:
-    ALLOWED_ORIGINS = [
-        "https://frankiefelicie.net",
-        "https://ministerioai.com",
-        "https://lakestationchurch.com",
-        "http://localhost:5500",  # para pruebas locales con live-server, etc.
-    ]
+if not OPENAI_API_KEY:
+    raise RuntimeError("Falta OPENAI_API_KEY en variables de entorno.")
 
-# Cliente OpenAI
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-# App FastAPI
 app = FastAPI()
 
-# Middleware CORS
+# Permite llamadas desde tu sitio (puedes cambiar "*" por tu dominio)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- Rutas ---
+HEADERS = {
+    "Authorization": f"Bearer {OPENAI_API_KEY}",
+    "Content-Type": "application/json",
+    # Este header es necesario para ChatKit hospedado
+    "OpenAI-Beta": "chatkit_beta=v1",
+}
+
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"ok": True}
 
 @app.post("/api/chatkit/start")
-async def start_session():
-    # Crea sesión ChatKit y devuelve client_secret (token corto)
-    session = client.chatkit.sessions.create({
+async def start():
+    """Crea una sesión y devuelve el client_secret corto-vencimiento."""
+    payload = {
         "workflow_id": WORKFLOW_ID,
-        "user": { "id": "anon_" + os.urandom(4).hex() }
-    })
-    return {"client_secret": session.client_secret}
+        "expires_in_seconds": 3600  # 1 hora
+    }
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(f"{API_BASE}/chatkit/sessions",
+                              headers=HEADERS, json=payload)
+        data = r.json()
+        if r.status_code >= 400:
+            return JSONResponse({"error": data}, status_code=r.status_code)
+        # ChatKit quiere el string, no el objeto completo
+        return {
+            "client_secret": data["client_secret"]["value"],
+            "expires_at": data["client_secret"]["expires_at"]
+        }
 
 @app.post("/api/chatkit/refresh")
-async def refresh_session(req: Request):
-    data = await req.json()
-    current = data.get("currentClientSecret")
-    session = client.chatkit.sessions.refresh({
-        "client_secret": current
-    })
-    return {"client_secret": session.client_secret}
+async def refresh(request: Request):
+    """Refresca el token cuando esté por expirar."""
+    body = await request.json()
+    current = body.get("currentClientSecret")
+    if not current:
+        return JSONResponse({"error": "Falta currentClientSecret"},
+                            status_code=400)
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(f"{API_BASE}/chatkit/sessions/refresh",
+                              headers=HEADERS, json={"client_secret": current})
+        data = r.json()
+        if r.status_code >= 400:
+            return JSONResponse({"error": data}, status_code=r.status_code)
+        return {
+            "client_secret": data["client_secret"]["value"],
+            "expires_at": data["client_secret"]["expires_at"]
+        }
