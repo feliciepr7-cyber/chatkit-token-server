@@ -73,3 +73,10 @@ async def refresh(request: Request):
             "client_secret": data["client_secret"]["value"],
             "expires_at": data["client_secret"]["expires_at"]
         }
+@app.get("/")
+async def root():
+    return {
+        "ok": True,
+        "service": "ChatKit token server",
+        "endpoints": ["/health", "/api/chatkit/start", "/api/chatkit/refresh"]
+    }
