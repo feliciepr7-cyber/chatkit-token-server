@@ -1,5 +1,6 @@
 import os
 import httpx
+from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -23,14 +24,18 @@ HEADERS = {
 # ========= APP =========
 app = FastAPI(title="ChatKit token server")
 
-# CORS abierto para superar preflight mientras probamos
+# CORS abierto para pruebas (cuando funcione, cierra a tus dominios)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],         # Cuando ya funcione, puedes cambiar a la lista de tus dominios
-    allow_credentials=False,     # IMPORTANTE: con "*" debe ser False
+    allow_origins=["*"],
+    allow_credentials=False,                 # con "*" debe ser False
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+def anon_user_id() -> str:
+    """Genera un ID anónimo por sesión."""
+    return f"anon_{uuid4().hex}"
 
 # ========= ROUTES =========
 @app.get("/")
@@ -50,20 +55,24 @@ async def health():
 async def start():
     """
     Crea una sesión de ChatKit y devuelve el client_secret (token corto).
+    REQUIERE: workflow + user
     """
     payload = {
-        "workflow": {"id": WORKFLOW_ID},   # CLAVE: usar 'workflow' -> {'id': ...}
+        "workflow": {"id": WORKFLOW_ID},
+        "user": {"id": anon_user_id()},      # <- CLAVE: incluir 'user'
         "expires_in_seconds": 3600,
     }
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.post(f"{API_BASE}/chatkit/sessions",
-                                  headers=HEADERS, json=payload)
+            r = await client.post(
+                f"{API_BASE}/chatkit/sessions",
+                headers=HEADERS,
+                json=payload,
+            )
             data = r.json()
             if r.status_code >= 400:
                 return JSONResponse({"error": data}, status_code=r.status_code)
 
-            # La API devuelve {"client_secret": {"value": "...", "expires_at": "..."}}
             secret = data.get("client_secret", {})
             if isinstance(secret, dict):
                 return {"client_secret": secret.get("value"), "expires_at": secret.get("expires_at")}
@@ -74,16 +83,21 @@ async def start():
 @app.post("/api/chatkit/refresh")
 async def refresh(request: Request):
     """
-    Renovación sencilla: emitimos un NUEVO client_secret (evita edge-cases de refresh).
+    Estrategia simple: emitir un NUEVO client_secret (en lugar de 'refresh').
+    Debe incluir 'user' también.
     """
     payload = {
         "workflow": {"id": WORKFLOW_ID},
+        "user": {"id": anon_user_id()},
         "expires_in_seconds": 3600,
     }
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.post(f"{API_BASE}/chatkit/sessions",
-                                  headers=HEADERS, json=payload)
+            r = await client.post(
+                f"{API_BASE}/chatkit/sessions",
+                headers=HEADERS,
+                json=payload,
+            )
             data = r.json()
             if r.status_code >= 400:
                 return JSONResponse({"error": data}, status_code=r.status_code)
